@@ -19,7 +19,11 @@ using Windows.UI.Xaml.Controls;
 using Windows.UI.Xaml.Controls.Primitives;
 using Windows.UI.Xaml.Media;
 using Windows.Foundation;
+using Windows.Media.Capture;
+using Windows.Storage.Streams;
 using Windows.UI.ViewManagement;
+using System.Runtime.InteropServices.WindowsRuntime;
+using Interop;
 
 namespace SimpleRecorder
 {
@@ -72,10 +76,10 @@ namespace SimpleRecorder
             var quality = (VideoEncodingQuality)Enum.Parse(typeof(VideoEncodingQuality), (string)QualityComboBox.SelectedItem, false);
             var useSourceSize = UseCaptureItemSizeCheckBox.IsChecked.Value;
 
-            var temp = MediaEncodingProfile.CreateMp4(quality);
-            var bitrate = temp.Video.Bitrate;
-            var width = temp.Video.Width;
-            var height = temp.Video.Height;
+            var videoProfile = MediaEncodingProfile.CreateMp4(quality);
+            var bitrate = videoProfile.Video.Bitrate;
+            var width = videoProfile.Video.Width;
+            var height = videoProfile.Video.Height;
 
             // Get our capture item
             var picker = new GraphicsCapturePicker();
@@ -108,16 +112,32 @@ namespace SimpleRecorder
             MainTextBlock.Foreground = new SolidColorBrush(Colors.Red);
             MainProgressBar.IsIndeterminate = true;
 
+
+            if (mediaCapture == null)
+            {
+                mediaCapture = new MediaCapture();
+                var settings = new MediaCaptureInitializationSettings
+                {
+                    StreamingCaptureMode = StreamingCaptureMode.Audio,
+                };
+                await mediaCapture.InitializeAsync(settings);
+            }
+            var audioStream = new InMemoryRandomAccessStream();
+            var audioProfile = MediaEncodingProfile.CreateMp3(AudioEncodingQuality.Medium);
+            _mediaRecording = await mediaCapture.PrepareLowLagRecordToStreamAsync(
+                audioProfile,
+                audioStream);
+            await _mediaRecording.StartAsync();
+
             // Kick off the encoding
             try
             {
                 using (var stream = await file.OpenAsync(FileAccessMode.ReadWrite))
-                using (_encoder = new Encoder(_device, item))
+                using (_encoder = new EncoderWithAudioStream(_device, item, audioStream, audioProfile))
                 {
+                    await _encoder.CreateMediaObjects();
                     await _encoder.EncodeAsync(
-                        stream, 
-                        width, height, bitrate, 
-                        frameRate);
+                        stream, width, height, bitrate, frameRate, videoProfile);
                 }
                 MainTextBlock.Foreground = originalBrush;
             }
@@ -172,10 +192,14 @@ namespace SimpleRecorder
             await Launcher.LaunchFileAsync(newFile);
         }
 
-        private void ToggleButton_Unchecked(object sender, RoutedEventArgs e)
+        private async void ToggleButton_Unchecked(object sender, RoutedEventArgs e)
         {
             // If the encoder is doing stuff, tell it to stop
             _encoder?.Dispose();
+
+            await _mediaRecording.StopAsync();
+            await _mediaRecording.FinishAsync();
+            _mediaRecording = null;
         }
 
         private async Task<StorageFile> PickVideoAsync()
@@ -282,6 +306,49 @@ namespace SimpleRecorder
         }
 
         private IDirect3DDevice _device;
-        private Encoder _encoder;
+        private EncoderWithAudioStream _encoder;
+        private StorageFile _mp3File;
+
+        private async void PickAudioFile(object sender, RoutedEventArgs e)
+        {
+            FileOpenPicker filePicker = new FileOpenPicker();
+            filePicker.SuggestedStartLocation = PickerLocationId.MusicLibrary;
+            filePicker.FileTypeFilter.Add(".mp3");
+            filePicker.ViewMode = PickerViewMode.List;
+
+            _mp3File = await filePicker.PickSingleFileAsync();
+
+            audioName.Text = _mp3File.Name;
+        }
+
+        private MediaCapture mediaCapture;
+        private LowLagMediaRecording _mediaRecording;
+
+        private AudioCapture _AudioCapture;
+
+        private async void StartCaptureAudio(object sender, RoutedEventArgs e)
+        {
+            // There is a permission issue when calling WASAPI from C# project: it won't show the Ask Permission Dialog.
+            // So call mediaCapture API to show the Ask Permission dialog as workaround.
+            if (mediaCapture == null)
+            {
+                mediaCapture = new MediaCapture();
+                await mediaCapture.InitializeAsync(new MediaCaptureInitializationSettings(){StreamingCaptureMode = StreamingCaptureMode.Audio});
+            }
+
+            _AudioCapture = new AudioCapture();
+            _AudioCapture.StartCapture();
+        }
+
+        private async void StopCaptureAudio(object sender, RoutedEventArgs e)
+        {
+            _AudioCapture.StopCapture();
+            _AudioCapture = null;
+        }
+
+        private void ToggleMute(object sender, RoutedEventArgs e)
+        {
+            
+        }
     }
 }
